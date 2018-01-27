@@ -3,7 +3,7 @@ Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio 15
 VisualStudioVersion = 15.0.27130.2024
 MinimumVisualStudioVersion = 10.0.40219.1
-Project("{F184B08F-C81C-45F6-A57F-5ABD9991F28F}") = "SprintDLL", "PInvoke\SprintDLL.vbproj", "{71B7F147-CCA8-4B0A-8957-655B7AC4E22D}"
+Project("{F184B08F-C81C-45F6-A57F-5ABD9991F28F}") = "SprintDLL", "SprintDLL\SprintDLL.vbproj", "{71B7F147-CCA8-4B0A-8957-655B7AC4E22D}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
