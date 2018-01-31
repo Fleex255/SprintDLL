@@ -112,6 +112,7 @@ Module Main
                 Case Else
                     Throw New InvalidOperationException("Invalid size adjustment: " & nextText)
             End Select
+            Parser.SkipWhitespace()
         Loop
         Return CTypeDynamic(CInt(OriginalLength / divisor), numType)
     End Function
@@ -180,6 +181,8 @@ Module Main
         Select Case instruction
             Case ""
                 Exit Sub ' Blank line
+            Case "//"
+                Exit Sub ' Comment
             Case "call"
                 DoCall(parse.PeekToEnd(), State)
             Case "newslot"
@@ -212,11 +215,24 @@ Module Main
                     End If
                 End If
             Case "readslot"
+                Dim printSlotName As Boolean = True
+                Do
+                    If parse.PeekCharacter() <> "/"c Then Exit Do
+                    Select Case parse.GetTextToDelimiter()
+                        Case "/raw"
+                            printSlotName = False
+                    End Select
+                    parse.SkipWhitespace()
+                Loop
                 Dim slotName = parse.GetTextToDelimiter()
                 Dim slot = State.Slots(slotName)
                 If SlotKinds.StandardKinds.Values.Contains(slot.Kind) Then
                     Dim value = GetSlotData(slot, State)
-                    Console.WriteLine("The value in slot " & slotName & " is " & slot.Kind.StringFunc(value))
+                    If printSlotName Then
+                        Console.WriteLine("The value in slot " & slotName & " is " & slot.Kind.StringFunc(value))
+                    Else
+                        Console.WriteLine(slot.Kind.StringFunc(value))
+                    End If
                 Else
                     Console.WriteLine("The value in slot " & slotName & " is a block of length " & slot.Kind.Length)
                 End If
