@@ -21,6 +21,9 @@ Module Main
         parse.SkipWhitespace()
         Dim state As New Workspace
         state.BuildingAssembly = AssemblyBuilder.DefineDynamicAssembly(New AssemblyName(Guid.NewGuid().ToString), AssemblyBuilderAccess.Run)
+        Dim zeroSlot As New Slot With {.Kind = SlotKinds.LongKind, .Pointer = Marshal.AllocHGlobal(8)}
+        Marshal.WriteInt64(zeroSlot.Pointer, 0)
+        state.Slots.Add("zero", zeroSlot)
         Dim createStandardIntSlot = Sub(Name As String, Data As Integer)
                                         Dim slot As New Slot With {.Kind = SlotKinds.IntKind, .Pointer = Marshal.AllocHGlobal(4)}
                                         Marshal.WriteInt32(slot.Pointer, Data)
@@ -45,7 +48,7 @@ Module Main
             If TypeOf ex Is ParserException Then
                 CType(ex, ParserException).PrintParseErrorReport()
             Else
-                Console.WriteLine(ex.Message)
+                PrintExceptionReport(ex)
             End If
             Console.ReadKey(True)
         End Try
@@ -115,6 +118,48 @@ Module Main
             Parser.SkipWhitespace()
         Loop
         Return CTypeDynamic(CInt(OriginalLength / divisor), numType)
+    End Function
+    Function ParseCopyPointerAndLength(Parser As Parser, State As Workspace) As Tuple(Of IntPtr, Integer)
+        Dim slot = State.Slots(Parser.GetTextToDelimiter())
+        Parser.SkipWhitespace()
+        Dim finalPtr = slot.Pointer
+        Dim fieldSize As Integer = slot.Kind.Length
+        Dim canUseSlotInfo As Boolean = True
+        Do
+            If Parser.AtEnd() Then Exit Do
+            If Parser.PeekCharacter() = "="c Then Exit Do
+            Dim adjustKeyword = Parser.GetTextToDelimiter().ToLowerInvariant()
+            Parser.SkipWhitespace()
+            Select Case adjustKeyword
+                Case "offset"
+                    Dim offset = ParseGetNumberOrNumericSlotValue(Parser, State)
+                    Parser.SkipWhitespace()
+                    If Not Parser.AtEnd() AndAlso Parser.PeekCharacter() <> "="c Then offset *= ParseUnitFactor(Parser, State)
+                    finalPtr += offset
+                    fieldSize = 0
+                Case "field"
+                    If Not canUseSlotInfo Then Throw New InvalidOperationException("Field offsets are not available for inner blocks")
+                    Dim field = Parser.GetNumber(Of Integer)()
+                    finalPtr += Marshal.OffsetOf(slot.Kind.MarshalAsType, "Member" & field)
+                    fieldSize = Marshal.SizeOf(slot.Kind.MarshalAsType.GetField("Member" & field).FieldType)
+                    canUseSlotInfo = False
+                Case "dereferenced"
+                    finalPtr = Marshal.ReadIntPtr(finalPtr)
+                    canUseSlotInfo = False
+                    fieldSize = 0
+                Case Else
+                    Throw New InvalidOperationException("Invalid pointer adjustment keyword: " & adjustKeyword)
+            End Select
+            Parser.SkipWhitespace()
+        Loop
+        Return Tuple.Create(finalPtr, fieldSize)
+    End Function
+    Function ParseGetNumberOrNumericSlotValue(Parser As Parser, State As Workspace) As Integer
+        If Parser.AtNumber() Then
+            Return Parser.GetNumber(Of Integer)()
+        Else
+            Return GetSlotData(State.Slots(Parser.GetTextToDelimiter()), State)
+        End If
     End Function
     Function ProcessParamList(Text As String, State As Workspace) As Object()
         Dim parse As New Parser(Text)
@@ -189,9 +234,9 @@ Module Main
                 Dim slot As New Slot
                 Dim kindName = parse.GetTextToDelimiter().ToLowerInvariant()
                 parse.SkipWhitespace()
+                Dim slotName = parse.GetTextToDelimiter()
+                parse.SkipWhitespace()
                 If kindName = "block" Then
-                    Dim slotName = parse.GetTextToDelimiter()
-                    parse.SkipWhitespace()
                     parse.AssumeCharacter("="c)
                     parse.SkipWhitespace()
                     Dim paramValues = ProcessParamList(parse.PeekToEnd(), State)
@@ -201,12 +246,9 @@ Module Main
                     slot.Kind = customKind
                     slot.Pointer = Marshal.AllocHGlobal(slot.Kind.Length)
                     Marshal.StructureToPtr(structObject, slot.Pointer, False)
-                    State.Slots.Add(slotName, slot)
                 Else
                     slot.Kind = SlotKinds.StandardKinds(kindName)
                     slot.Pointer = Marshal.AllocHGlobal(slot.Kind.Length)
-                    State.Slots.Add(parse.GetTextToDelimiter(), slot)
-                    parse.SkipWhitespace()
                     If Not parse.AtEnd() Then
                         parse.AssumeCharacter("="c)
                         parse.SkipWhitespace()
@@ -214,7 +256,9 @@ Module Main
                         SetSlotData(slot, State, value)
                     End If
                 End If
+                State.Slots.Add(slotName, slot)
             Case "readslot"
+                If parse.AtEnd Then Throw New Exception("Slot not specified")
                 Dim printSlotName As Boolean = True
                 Do
                     If parse.PeekCharacter() <> "/"c Then Exit Do
@@ -248,63 +292,45 @@ Module Main
                 parse.SkipWhitespace()
                 parse.AssumeCharacter(":"c)
                 parse.SkipWhitespace()
-                Dim length As Integer
-                If parse.AtNumber() Then
-                    length = parse.GetNumber(Of Integer)
-                Else
-                    length = GetSlotData(State.Slots(parse.GetTextToDelimiter()), State)
-                End If
+                Dim length As Integer = ParseGetNumberOrNumericSlotValue(parse, State)
                 parse.SkipWhitespace()
                 If Not parse.AtEnd() Then length *= ParseUnitFactor(parse, State)
                 slot.Length = length
                 SetSlotData(slot, State, Marshal.AllocHGlobal(length))
                 parse.SkipWhitespace()
             Case "copyslot"
-                Dim slot = State.Slots(parse.GetTextToDelimiter())
-                parse.SkipWhitespace()
-                Dim destPtr = slot.Pointer
-                If parse.PeekCharacter() <> "="c Then
-                    Dim keyword = parse.GetTextToDelimiter().ToLowerInvariant
+                parse.AssumeNotEnd()
+                Dim copyLength As Integer = 0
+                If parse.PeekCharacter() = "/"c Then
+                    Dim switch = parse.GetTextToDelimiter().ToLowerInvariant()
                     parse.SkipWhitespace()
-                    Dim number As Integer = parse.GetNumber(Of Integer)()
-                    parse.SkipWhitespace()
-                    Select Case keyword
-                        Case "field"
-                            Dim structType = slot.Kind.MarshalAsType
-                            destPtr += Marshal.OffsetOf(structType, "Member" & number)
-                        Case "offset"
-                            destPtr += number
+                    Select Case switch
+                        Case "/bytes"
+                            copyLength = ParseGetNumberOrNumericSlotValue(parse, State)
+                        Case "/length"
+                            Dim rawNum = ParseGetNumberOrNumericSlotValue(parse, State)
+                            parse.SkipWhitespace()
+                            copyLength = rawNum * ParseUnitFactor(parse, State)
+                        Case "/lengthof"
+                            copyLength = SlotKinds.StandardKinds(parse.GetTextToDelimiter().ToLowerInvariant()).Length
                         Case Else
-                            Throw New InvalidOperationException("Invalid keyword for copyslot destination: " & keyword)
+                            Throw New InvalidOperationException("Invalid copyslot length switch: " & switch)
                     End Select
+                    parse.SkipWhitespace()
                 End If
+                Dim destInfo = ParseCopyPointerAndLength(parse, State)
+                parse.SkipWhitespace()
                 parse.AssumeCharacter("="c)
                 parse.SkipWhitespace()
-                Dim srcSlot = State.Slots(parse.GetTextToDelimiter())
+                Dim srcInfo = ParseCopyPointerAndLength(parse, State)
                 parse.SkipWhitespace()
-                If parse.AtEnd() Then
-                    SetSlotData(slot, State, GetSlotData(srcSlot, State))
-                Else
-                    Dim keyword = parse.GetTextToDelimiter().ToLowerInvariant()
-                    parse.SkipWhitespace()
-                    Dim number As Integer?
-                    If Not parse.AtEnd() Then number = parse.GetNumber(Of Integer)()
-                    parse.SkipWhitespace()
-                    Dim valueBytes(slot.Kind.Length - 1) As Byte
-                    Select Case keyword
-                        Case "field"
-                            Dim structType = srcSlot.Kind.MarshalAsType
-                            Marshal.Copy(srcSlot.Pointer + Marshal.OffsetOf(structType, "Member" & number), valueBytes, 0, valueBytes.Length)
-                        Case "offset"
-                            Marshal.Copy(srcSlot.Pointer + number, valueBytes, 0, valueBytes.Length)
-                        Case "dereferenced"
-                            Dim address = Marshal.ReadIntPtr(srcSlot.Pointer)
-                            Marshal.Copy(address, valueBytes, 0, valueBytes.Length)
-                        Case Else
-                            Throw New InvalidOperationException("Invalid keyword for copyslot source: " & keyword)
-                    End Select
-                    Marshal.Copy(valueBytes, 0, destPtr, valueBytes.Length)
-                End If
+                parse.AssumeEnd()
+                If copyLength = 0 Then copyLength = destInfo.Item2
+                If copyLength = 0 Then copyLength = srcInfo.Item2
+                If copyLength = 0 Then Throw New InvalidOperationException("Copy length could not be automatically determined")
+                Dim valueBytes(copyLength - 1) As Byte
+                Marshal.Copy(srcInfo.Item1, valueBytes, 0, copyLength)
+                Marshal.Copy(valueBytes, 0, destInfo.Item1, copyLength)
             Case "run"
                 Dim filename = parse.GetPossiblyQuotedText
                 Using fScript As New IO.StreamReader(filename)
@@ -319,6 +345,11 @@ Module Main
                 Dim slot = State.Slots(slotName)
                 Marshal.FreeHGlobal(slot.Pointer)
                 State.Slots.Remove(slotName)
+            Case "zeroslot"
+                Dim slotName = parse.GetTextToDelimiter
+                Dim slot = State.Slots(slotName)
+                Dim zeros(slot.Kind.Length - 1) As Byte
+                Marshal.Copy(zeros, 0, slot.Pointer, zeros.Length)
             Case "pause"
                 Console.ReadKey(True)
             Case "interactive"
@@ -333,7 +364,7 @@ Module Main
                     Catch ex As ParserException
                         ex.PrintParseErrorReport()
                     Catch ex As Exception
-                        Console.WriteLine(ex.Message)
+                        PrintExceptionReport(ex)
                     End Try
                 Loop
                 State.RunningScripts.Pop()
@@ -398,7 +429,7 @@ Module Main
                 returnIntoSlot = State.Slots(returnIntoSlotName)
                 retKind = returnIntoSlot.Kind
             ElseIf State.Slots.ContainsKey(returnIntoSlotName) Then
-                If State.Slots(returnIntoSlotName).Kind.MarshalAsType IsNot retKind Then Throw New InvalidOperationException("Return type doesn't match type of slot: " & returnIntoSlotName)
+                If State.Slots(returnIntoSlotName).Kind.MarshalAsType IsNot retKind.MarshalAsType Then Throw New InvalidOperationException("Return type doesn't match type of slot: " & returnIntoSlotName)
             End If
         End If
         Dim dynModule = State.BuildingAssembly.DefineDynamicModule(Guid.NewGuid().ToString)
@@ -440,6 +471,13 @@ Module Main
             Else
                 Console.WriteLine(funcName & " returned " & retKind.StringFunc(result))
             End If
+        End If
+    End Sub
+    Sub PrintExceptionReport(Ex As Exception)
+        If TypeOf Ex Is TargetInvocationException Then
+            Console.WriteLine(Ex.InnerException.Message)
+        Else
+            Console.WriteLine(Ex.Message)
         End If
     End Sub
 End Module

@@ -13,7 +13,7 @@ Public Class Parser
         If AtEnd() Then Return Nothing Else Return Text(Position)
     End Function
     Public Function GetCharacter() As Char
-        If Position >= Text.Length Then ThrowParseException("Unexpected end of text fragment")
+        AssumeNotEnd()
         Dim nextChar = Text(Position)
         Position += 1
         Return nextChar
@@ -26,6 +26,12 @@ Public Class Parser
     Public Sub AssumeCharacter(Character As Char)
         If GetCharacter() <> Character Then ThrowParseException("Expected character was " & Character, Position - 1)
     End Sub
+    Public Sub AssumeEnd()
+        If Not AtEnd() Then ThrowParseException("Expected end of text fragment")
+    End Sub
+    Public Sub AssumeNotEnd()
+        If AtEnd() Then ThrowParseException("Unexpected end of text fragment")
+    End Sub
     Public Function GetQuotedString() As String
         AssumeCharacter("""")
         Dim sb As New StringBuilder
@@ -35,8 +41,17 @@ Public Class Parser
                 Exit Do
             ElseIf curChar = "\" Then
                 Dim maybeEscapedChar = GetCharacter()
-                If Not {"""", "\"}.Contains(maybeEscapedChar) Then sb.Append("\")
-                sb.Append(maybeEscapedChar)
+                If Not {""""c, "\"c, "N"c, "n"c, "r"c}.Contains(maybeEscapedChar) Then sb.Append("\")
+                Select Case maybeEscapedChar
+                    Case """"c, "\"c
+                        sb.Append(maybeEscapedChar)
+                    Case "N"c
+                        sb.Append(vbCrLf)
+                    Case "n"c
+                        sb.Append(vbLf)
+                    Case "r"c
+                        sb.Append(vbCr)
+                End Select
             Else
                 sb.Append(curChar)
             End If
